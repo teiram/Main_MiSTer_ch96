@@ -407,7 +407,7 @@ static void ApplyConfiguration(char reloadkickstart)
 
 	if (!reloadkickstart)
 	{
-		minimig_ConfigChipset(minimig_config.chipset);
+		minimig_ConfigChipset(&minimig_config);
 		minimig_ConfigFloppy(minimig_config.floppy.drives, minimig_config.floppy.speed);
 	}
 
@@ -448,10 +448,13 @@ static void ApplyConfiguration(char reloadkickstart)
 		(hdd_open(2) ? 8 : 0) |
 		(hdd_open(3) ? 16 : 0));
 
+	cd_drive_open(0, minimig_config.cd32_drive.cfg ? minimig_config.cd32_drive.filename : "");
+	cd_drive_open(1, minimig_config.cdtv_drive.cfg ? minimig_config.cdtv_drive.filename : "");
+
 	minimig_ConfigMemory(memcfg);
 	minimig_ConfigCPU(minimig_config.cpu);
 
-	minimig_ConfigChipset(minimig_config.chipset);
+	minimig_ConfigChipset(&minimig_config);
 	minimig_ConfigFloppy(minimig_config.floppy.drives, minimig_config.floppy.speed);
 
 	if (minimig_config.memory & 0x40) UploadActionReplay();
@@ -513,9 +516,10 @@ int minimig_cfg_load(int num)
 	{
 		BootPrint("Opened configuration file\n");
 		printf("Configuration file size: %s, %d\n", filename, size);
-		if (size == sizeof(minimig_config) || size == 5152)
+		if (size == sizeof(minimig_config) || size == 5152 || size == 5216)
 		{
 			static mm_configTYPE tmpconf = {};
+			memset((void*)&tmpconf, 0, sizeof(tmpconf));
 			if (FileLoadConfig(filename, &tmpconf, sizeof(tmpconf)))
 			{
 				// check file id and version
@@ -578,6 +582,10 @@ int minimig_cfg_load(int num)
 		minimig_config.hardfile[2].filename[0] = 0;
 		minimig_config.hardfile[3].cfg = 0;
 		minimig_config.hardfile[3].filename[0] = 0;
+		minimig_config.cd32_drive.cfg = 0;
+		minimig_config.cd32_drive.filename[0] = 0;
+		minimig_config.cdtv_drive.cfg = 0;
+		minimig_config.cdtv_drive.filename[0] = 0;
 		BootPrintEx(">>> No config found. Using defaults. <<<");
 	}
 
@@ -826,8 +834,9 @@ void minimig_ConfigCPU(unsigned char cpu)
 	spi_uio_cmd8(UIO_MM2_CPU, cpu & 0x1f);
 }
 
-void minimig_ConfigChipset(unsigned char chipset)
+void minimig_ConfigChipset(mm_configTYPE *config)
 {
+	unsigned char chipset = config->cdtv_drive.cfg ? (config->chipset | CONFIG_CDTV) : (config->chipset & ~CONFIG_CDTV);
 	spi_uio_cmd8(UIO_MM2_CHIP, chipset & 0x3f);
 }
 
@@ -857,4 +866,39 @@ void minimig_set_extcfg(unsigned int ext_cfg)
 unsigned int minimig_get_extcfg()
 {
 	return (minimig_config.ext_cfg2 << 16) | minimig_config.ext_cfg;
+}
+
+void minimig_cfg_set(int preset)
+{
+	int len;
+	switch (preset)
+	{
+	case CONFIG_PRESET_CD32:
+		minimig_config.cpu = 3; // 68020, d-cache off;
+		minimig_config.chipset = (6 << 2); // AGA
+		minimig_config.memory = 3; // ChipRAM 2MB, FastRAM 0MB
+		strcpy(minimig_config.kickstart, "Games/Amiga/CD32.rom");
+		len = strlen(minimig_config.kickstart);
+		strcpy(minimig_config.kickstart+len+1, "Games/Amiga/CD32_ext.rom");
+		minimig_config.autofire = 2 << 1; // CD32 joystick
+		minimig_config.cd32_drive.cfg = 1;
+		minimig_config.cdtv_drive.cfg = 0;
+		minimig_config.ide_cfg = 0;
+		break;
+
+	case CONFIG_PRESET_CDTV:
+		minimig_config.cpu = 0; // 68000
+		minimig_config.chipset = (2 << 2); // ECS
+		minimig_config.memory = 1; // ChipRAM 1MB, FastRAM 0MB
+		strcpy(minimig_config.kickstart, "Games/Amiga/CDTV.rom");
+		len = strlen(minimig_config.kickstart);
+		strcpy(minimig_config.kickstart + len + 1, "Games/Amiga/CDTV_ext.rom");
+		minimig_config.autofire = 0; // Digital joystick
+		minimig_config.cd32_drive.cfg = 0;
+		minimig_config.cdtv_drive.cfg = 1;
+		minimig_config.ide_cfg = 0;
+		break;
+	}
+
+	force_reload_kickstart = 1;
 }

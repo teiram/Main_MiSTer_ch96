@@ -226,7 +226,15 @@ char is_menu()
 static int is_x86_type = 0;
 char is_x86()
 {
-	if (!is_x86_type) is_x86_type = strcasecmp(orig_name, "AO486") ? 2 : 1;
+	if (!is_x86_type)
+	{
+		if (!strcasecmp(orig_name, "AO486") ||
+		    !strcasecmp(orig_name, "PC110")
+		   )
+			is_x86_type = 1;
+		else
+			is_x86_type = 2;
+	}
 	return (is_x86_type == 1);
 }
 
@@ -272,9 +280,18 @@ char is_neogeo_cd() {
 static int is_minimig_type = 0;
 char is_minimig()
 {
-	if (!is_minimig_type) is_minimig_type =
-		(!strcasecmp(orig_name, "minimig") || !strcasecmp(orig_name, "minimigcd")) ? 1 : 2;
-	return (is_minimig_type == 1);
+	if (!is_minimig_type)
+	{
+		is_minimig_type = (!strcasecmp(orig_name, "minimig") || !strcasecmp(orig_name, "minimigcd")) ? 1 : 2;
+		if (is_minimig_type == 1)
+		{
+			uint16_t res = spi_uio_cmd(UIO_GET_VMODE);
+			if (res == 1) is_minimig_type = 3;
+		}
+
+	}
+
+	return (is_minimig_type == 1) ? 1 : (is_minimig_type == 3) ? 2 : 0;
 }
 
 static int is_megacd_type = 0;
@@ -1717,7 +1734,7 @@ void user_io_init(const char *path, const char *xml)
 		if (xml && isXmlName(xml) == 1) arcade_check_error();
 
 		char cfg_errs[512];
-		if (cfg_check_errors(cfg_errs, sizeof(cfg_errs)))
+		if (cfg.sanity_check && cfg_check_errors(cfg_errs, sizeof(cfg_errs)))
 		{
 			Info(cfg_errs, 5000);
 			sleep(5);
@@ -3199,8 +3216,12 @@ void user_io_poll()
 		ide_io(1, (sd_req >> 3) & 7);
 		if (sd_req & 0x0100) ide_cdda_send_sector();
 		UpdateDriveStatus();
-		akiko_cd32_poll();
-		cdtv_cd_poll();
+
+		if (is_minimig() == 2)
+		{
+			akiko_cd32_poll();
+			cdtv_cd_poll();
+		}
 
 		kbd_fifo_poll();
 
