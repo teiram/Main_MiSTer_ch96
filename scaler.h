@@ -28,7 +28,7 @@ typedef struct {
    int map_off;
 } mister_scaler;
 
-#define MISTER_SCALER_BASEADDR     0x20000000
+#define MISTER_SCALER_BASEADDR     0x1E800000
 #define MISTER_SCALER_BUFFERSIZE   2048*3*1024
 
 mister_scaler *mister_scaler_init();

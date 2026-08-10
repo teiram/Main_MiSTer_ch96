@@ -21,7 +21,9 @@
 #include "fpga_manager.h"
 #include "fpga_system_manager.h"
 #include "fpga_reset_manager.h"
+#ifndef CHAMELEON96
 #include "fpga_nic301.h"
+#endif
 
 #define FPGA_REG_BASE 0xFF000000
 #define FPGA_REG_SIZE 0x01000000
@@ -34,7 +36,9 @@
 static struct socfpga_reset_manager  *reset_regs   = (socfpga_reset_manager *)SOCFPGA_RSTMGR_ADDRESS;
 static struct socfpga_fpga_manager   *fpgamgr_regs = (socfpga_fpga_manager *)SOCFPGA_FPGAMGRREGS_ADDRESS;
 static struct socfpga_system_manager *sysmgr_regs  = (socfpga_system_manager *)SOCFPGA_SYSMGR_ADDRESS;
+#ifndef CHAMELEON96
 static struct nic301_registers       *nic301_regs  = (nic301_registers *)SOCFPGA_L3REGS_ADDRESS;
+#endif
 
 static uint32_t *map_base;
 
@@ -381,14 +385,18 @@ static void do_bridge(uint32_t enable)
 	{
 		writel(0x00003FFF, (void*)(SOCFPGA_SDR_ADDRESS + 0x5080));
 		writel(0x00000000, &reset_regs->brg_mod_reset);
+#ifndef CHAMELEON96
 		writel(0x00000019, &nic301_regs->remap);
+#endif
 	}
 	else
 	{
 		writel(0, &sysmgr_regs->fpgaintfgrp_module);
 		writel(0, (void*)(SOCFPGA_SDR_ADDRESS + 0x5080));
 		writel(7, &reset_regs->brg_mod_reset);
+#ifndef CHAMELEON96
 		writel(1, &nic301_regs->remap);
+#endif
 	}
 }
 

@@ -205,6 +205,8 @@ fileTYPE *get_image(int i);
 int user_io_get_kbdemu();
 uint32_t user_io_get_uart_mode();
 
+void user_io_set_rf_leds(int yellow_on, int blue_on);
+
 uint32_t user_io_get_activity_seq();
 void user_io_mouse(unsigned char b, int16_t x, int16_t y, int16_t w);
 void user_io_kbd(uint16_t key, int press);

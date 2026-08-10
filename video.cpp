@@ -34,7 +34,11 @@
 #include "lib/md5/md5.h"
 
 #define FB_SIZE  (1920*1080)
+#ifdef CHAMELEON96
+#define FB_ADDR  (0x1D000000) // Chameleon96: 512MB total, framebuffer in the top 48MB (0x1D000000-0x1FFFFFFF), Linux capped at 464MB
+#else
 #define FB_ADDR  (0x20000000 + (32*1024*1024)) // 512mb + 32mb(Core's fb)
+#endif
 
 /*
 --  [2:0] : 011=8bpp(palette) 100=16bpp 101=24bpp 110=32bpp
@@ -1122,6 +1126,11 @@ void video_loadPreset(char *name, bool save)
 
 static void hdmi_packet_enable(uint8_t mask, bool enable)
 {
+#ifdef CHAMELEON96
+	// No AVI/SPD/VRR packet support on the TDA19988 path.
+	(void)mask; (void)enable;
+	return;
+#endif
 	if (hdmi_main_fd >= 0)
 	{
 		uint8_t packet_val = i2c_smbus_read_byte_data(hdmi_main_fd, 0x40);
@@ -1136,6 +1145,11 @@ static void hdmi_packet_enable(uint8_t mask, bool enable)
 
 static void hdmi_packet_set_data(uint8_t mask, uint8_t offset, uint8_t *data, int size)
 {
+#ifdef CHAMELEON96
+	// No AVI/SPD/VRR packet support on the TDA19988 path.
+	(void)mask; (void)offset; (void)data; (void)size;
+	return;
+#endif
 	if (!data)
 	{
 		hdmi_packet_enable(mask, 0);
@@ -1176,6 +1190,11 @@ static void hdmi_packet_set_data(uint8_t mask, uint8_t offset, uint8_t *data, in
 
 static void hdmi_config_set_csc()
 {
+#ifdef CHAMELEON96
+	// ADV7513 CSC registers would clobber the TDA19988 VIP/port config; the
+	// TDA path does RGB passthrough (no CSC).
+	return;
+#endif
 	// default color conversion matrices
 	// for the original hexadecimal versions please refer
 	// to the ADV7513 programming guide section 4.3.7
@@ -1411,8 +1430,341 @@ int hdmi_has_int()
 	return has_int;
 }
 
+#ifdef CHAMELEON96
+// ---- TDA19988 support (Chameleon96) ---------------------------------
+// The Chameleon96 carries a TDA19988 HDMI transmitter instead of the
+// DE10-nano's ADV7513. It is reached through the same HPS I2C2 bus that
+// the hdmi_i2c fabric atom bit-bangs onto the TDA pins.
+//   HDMI core: 7-bit 0x73   CEC core: 7-bit 0x37
+// Registers are paged: a write to reg 0xff selects the current page.
+// Register map per the NXP TDA19988 datasheet and the u-boot/Linux
+// tda998x drivers; board values from chameleon96-workbench/hdmi/*.sh.
+
+static uint8_t tda_page = 0xff;
+
+static void tda_set_page(uint8_t page)
+{
+	if (tda_page != page)
+	{
+		i2c_smbus_write_byte_data(hdmi_main_fd, 0xff, page);
+		tda_page = page;
+	}
+}
+
+static void tda_write(uint8_t page, uint8_t reg, uint8_t val)
+{
+	tda_set_page(page);
+	int res = i2c_smbus_write_byte_data(hdmi_main_fd, reg, val);
+	if (res < 0) printf("i2c: TDA write error (P%02X %02X %02X): %d\n", page, reg, val, res);
+}
+
+static int tda_read(uint8_t page, uint8_t reg)
+{
+	tda_set_page(page);
+	return i2c_smbus_read_byte_data(hdmi_main_fd, reg);
+}
+
+static void tda_write16(uint8_t page, uint8_t reg, uint16_t val)
+{
+	tda_set_page(page);
+	i2c_smbus_write_byte_data(hdmi_main_fd, reg, (uint8_t)(val >> 8));
+	i2c_smbus_write_byte_data(hdmi_main_fd, reg + 1, (uint8_t)(val & 0xff));
+}
+
+static void tda_set_bit(uint8_t page, uint8_t reg, uint8_t mask)
+{
+	int val = tda_read(page, reg);
+	if (val < 0) return;
+	tda_write(page, reg, (uint8_t)(val | mask));
+}
+
+static void tda_clear_bit(uint8_t page, uint8_t reg, uint8_t mask)
+{
+	int val = tda_read(page, reg);
+	if (val < 0) return;
+	tda_write(page, reg, (uint8_t)(val & ~mask));
+}
+
+static void tda_config_init()
+{
+	if (hdmi_main_fd < 0)
+	{
+		// The CEC core answers even in low-power: wake the device there first.
+		int tda_bus = -1;
+		int cec = i2c_open(0x37, 0, -1, &tda_bus);
+		if (cec < 0)
+		{
+			printf("TDA19988: CEC core (0x37) not found on i2c bus! HDMI won't be available!\n");
+			return;
+		}
+		i2c_smbus_write_byte_data(cec, 0xff, 0x06); // CEC_ENAMODS: EN_HDMI | EN_RXSENS
+		usleep(50000);
+		i2c_smbus_write_byte_data(cec, 0x23, 0x20); // enable HDMI output path (workbench mode*.sh)
+		// CEC_FRO_IM_CLK_CTRL: GHOST_DIS | IMCLK_SEL (0x82) - both reference
+		// drivers write this at probe (u-boot tda19988.c:630, Linux
+		// tda998x_drv.c:1895). IMCLK_SEL clocks the DDC I2C master (EDID read)
+		// from the always-on internal FRO. Plus disable HPD interrupt (0xfc) and
+		// clear its pending flag (0xfd), matching the reference probes.
+		i2c_smbus_write_byte_data(cec, 0xfb, 0x82);
+		i2c_smbus_write_byte_data(cec, 0xfc, 0x00);
+		i2c_smbus_read_byte_data(cec, 0xfd);
+		i2c_close(cec);
+
+		hdmi_main_fd = i2c_open(0x73, 0, tda_bus);
+		if (hdmi_main_fd < 0)
+		{
+			printf("TDA19988: HDMI core (0x73) not found on i2c bus! HDMI won't be available!\n");
+			return;
+		}
+
+		int rev_lo = tda_read(0x00, 0x00);
+		int rev_hi = tda_read(0x00, 0x02);
+		printf("TDA19988: revision 0x%04X\n", ((rev_hi << 8) | rev_lo) & ~0x30);
+	}
+
+	tda_page = 0xff;
+
+	// Reset the transmitter and its I2C/DDC master into a clean state, then
+	// program the serializer PLL common config — mirroring the u-boot and
+	// Linux tda998x probe sequences (u-boot-socfpga/drivers/video/tda19988.c).
+	tda_write(0x00, 0x0a, 0x03); // SOFTRESET: audio + I2C master (DDC engine)
+	usleep(50000);
+	tda_write(0x00, 0x0a, 0x00);
+	usleep(50000);
+	int cntrl0 = tda_read(0x00, 0x01); // MAIN_CNTRL0: soft-reset the transmitter
+	if (cntrl0 >= 0)
+	{
+		tda_write(0x00, 0x01, cntrl0 | 0x01);
+		tda_write(0x00, 0x01, cntrl0 & ~0x01);
+	}
+
+	tda_write(0x02, 0x00, 0x00); // PLL_SERIAL_1
+	tda_write(0x02, 0x01, 0x01); // PLL_SERIAL_2: SRL_NOSC(1)
+	tda_write(0x02, 0x02, 0x00); // PLL_SERIAL_3
+	tda_write(0x02, 0x03, 0x00); // SERIALIZER
+	tda_write(0x02, 0x04, 0x00); // BUFFER_OUT
+	tda_write(0x02, 0x05, 0x00); // PLL_SCG1
+	tda_write(0x02, 0x06, 0x10); // PLL_SCG2
+	tda_write(0x02, 0x07, 0xfa); // PLL_SCGN1
+	tda_write(0x02, 0x08, 0x00); // PLL_SCGN2
+	tda_write(0x02, 0x09, 0x5b); // PLL_SCGR1
+	tda_write(0x02, 0x0a, 0x00); // PLL_SCGR2
+	tda_write(0x02, 0x0e, 0x03); // AUDIO_DIV: SERCLK_8
+	tda_write(0x02, 0x11, 0x09); // SEL_CLK: SEL_CLK1 | ENA_SC_CLK
+	tda_write(0x00, 0x27, 0x24); // MUX_VP_VIP_OUT
+
+	// enable DDC channel (needed to read sink EDID via page 09h)
+	tda_write(0x00, 0x0b, 0x00); // DDC_DISABLE = 0
+	tda_write(0x12, 0x9a, 39);   // TX3: DDC clock
+
+	// Video input configuration - values validated on the Chameleon96
+	// (chameleon96-workbench/hdmi/mode1080.sh / mode720.sh).
+	tda_write(0x00, 0x18, 0xff); // ENA_VP_0: video port A
+	tda_write(0x00, 0x19, 0xff); // ENA_VP_1: video port B
+	tda_write(0x00, 0x1a, 0xff); // ENA_VP_2: video port C
+	tda_write(0x00, 0x20, 0x23); // VIP_CNTRL_0: SWAP_A(2) | SWAP_B(3)
+	tda_write(0x00, 0x21, 0x45); // VIP_CNTRL_1: SWAP_C(4) | SWAP_D(5)
+	tda_write(0x00, 0x22, 0x01); // VIP_CNTRL_2: SWAP_E(0) | SWAP_F(1)
+	tda_write(0x00, 0x23, 0x14); // VIP_CNTRL_3: SYNC_DE | V_TGL
+	tda_write(0x00, 0xa0, 0x02); // VIDFORMAT: RGB565 16-bit input
+	tda_write(0x00, 0xcb, 0x00); // TBG_CNTRL_1: sync passthrough
+	tda_write(0x00, 0xf0, 0x00); // RPT_CNTRL: no pixel repetition
+
+	// Enable the DDC EDID block-read interrupt (INT_FLAGS_2 bit 1). Both
+	// reference drivers set it at probe (u-boot tda19988.c, Linux
+	// tda998x_drv.c); without the enable EDID_BLK_RD never latches and the
+	// DDC block read times out. Reading INT_FLAGS_0/1/2 clears stale flags.
+	tda_read(0x00, 0x0f);            // INT_FLAGS_0: clear pending
+	tda_read(0x00, 0x10);            // INT_FLAGS_1: clear pending
+	tda_read(0x00, 0x11);            // INT_FLAGS_2: clear pending
+	tda_write(0x00, 0x11, 0x02);     // INT_FLAGS_2: enable EDID_BLK_RD
+
+	// TX4 (P12 0x9B): EDID RAM power-down. read_edid() clears bit 1 for the
+	// read window; log its reset state so a DDC failure is easy to diagnose.
+	int tx4dbg = tda_read(0x12, 0x9b);
+	printf("TDA19988: TX4(P12 0x9B)=0x%02X%s\n",
+		tx4dbg < 0 ? 0xff : tx4dbg, tx4dbg < 0 ? " (read failed)" : "");
+
+	// Audio input configuration (48 kHz stereo I2S) - board-validated on the
+	// Chameleon96 via chameleon96-workbench/hdmi/hdmi_audio.sh. Without this
+	// the TDA stayed on its power-on defaults (SPDIF route, ENA_AP=0, no ACR
+	// and no audio InfoFrame), which is why no core produced sound. Values
+	// match the Linux tda998x_configure_audio() for 48 kHz I2S plus the audio
+	// InfoFrame packed by hdmi_audio_infoframe_pack() (drivers/video/hdmi.c).
+	tda_write(0x00, 0x16, 0x01);                  // ENA_ACLK: I2S bit clock input
+	tda_write(0x00, 0x1e, 0x03);                  // ENA_AP: AP0 (WS) | AP1 (data)
+	tda_write(0x00, 0x26, 0x64);                  // MUX_AP: I2S select
+	tda_write(0x00, 0xfd, 0x08);                  // AIP_CLKSEL: I2S | FS_ACLK
+	tda_write(0x11, 0x0c, 0x31);                  // CTS_N: M(3)|K(1)  (bclk ratio 32)
+	tda_write(0x11, 0x08, 0x00);                  // ACR_N_0: N = 6144 (48 kHz)
+	tda_write(0x11, 0x09, 0x18);                  // ACR_N_1
+	tda_write(0x11, 0x0a, 0x00);                  // ACR_N_2
+	tda_write(0x11, 0x05, 0x44);                  // ACR_CTS_0 (auto mode recomputes)
+	tda_write(0x11, 0x06, 0x42);                  // ACR_CTS_1
+	tda_write(0x11, 0x07, 0x01);                  // ACR_CTS_2
+	tda_write(0x11, 0x00, 0x40);                  // AIP_CNTRL_0: reset CTS generator
+	tda_write(0x11, 0x00, 0x00);                  // AIP_CNTRL_0: release, FIFO running
+	tda_write(0x11, 0x0e, 0x01);                  // DIP_FLAGS: ACR (insert audio clock regen)
+	tda_write(0x11, 0x14, 0x00);                  // CH_STAT_B0
+	tda_write(0x11, 0x15, 0x00);                  // CH_STAT_B1
+	tda_write(0x11, 0x16, 0x02);                  // CH_STAT_B3: sample freq 48 kHz
+	tda_write(0x11, 0x17, 0x00);                  // CH_STAT_B4
+	// Audio InfoFrame (IF4): LPCM 2ch 48 kHz 16-bit. DB1=0x11 DB2=0x0d are
+	// exactly what hdmi_audio_infoframe_pack() emits for that config.
+	tda_write(0x10, 0x80, 0x84);                  // IF4_HB0: type Audio | ver 1 | len 10
+	tda_write(0x10, 0x81, 0x01);                  // IF4_HB1
+	tda_write(0x10, 0x82, 0x0a);                  // IF4_HB2
+	tda_write(0x10, 0x83, 0x53);                  // IF4_checksum
+	tda_write(0x10, 0x84, 0x11);                  // DB1: 2 channels, 16-bit (CT=1)
+	tda_write(0x10, 0x85, 0x0d);                  // DB2: sample freq 48 kHz
+	tda_write(0x10, 0x86, 0x00);                  // DB3..DB10
+	tda_write(0x10, 0x87, 0x00);
+	tda_write(0x10, 0x88, 0x00);
+	tda_write(0x10, 0x89, 0x00);
+	tda_write(0x10, 0x8a, 0x00);
+	tda_write(0x10, 0x8b, 0x00);
+	tda_write(0x10, 0x8c, 0x00);
+	tda_write(0x10, 0x8d, 0x00);
+	tda_set_bit(0x11, 0x0f, 0x10);                 // DIP_IF_FLAGS: transmit IF4 (AIF)
+
+	// Force the HDMI path and enable the data-island window: ACR packets and
+	// audio InfoFrames can only be transmitted in HDMI mode (they are blocked
+	// in DVI mode). Matches Linux tda998x encoder_mode_set / u-boot
+	// tda19988_enable (ENC_CNTRL CTL_CODE(1), TX33_HDMI, DWIN_DIS clear).
+	tda_write(0x11, 0x0d, 0x04);                  // ENC_CNTRL: CTL_CODE(1) -> HDMI
+	tda_set_bit(0x12, 0xb8, 0x02);                // TX33: TX33_HDMI
+}
+
+static void tda_config_set_mode(vmode_custom_t *vm)
+{
+	// SYNC_DE passthrough (board-validated, mode720_full.sh de): the TDA's TBG
+	// regenerates the output HS/VS from a timing reference, so per-mode timing
+	// registers (REFPIX/NPIX/NLINE, HS/VS positions, VWIN) must be programmed
+	// from vm or the regenerated sync is phase-offset from the passed-through
+	// DE (picture shifted left, left edge cut off). DE_START/STOP are skipped
+	// because DE is passed through. Values match u-boot tda19988_enable /
+	// Linux tda998x_set_video_mode and the on-board validated de variant.
+	uint32_t htotal = vm->param.hact + vm->param.hfp + vm->param.hs + vm->param.hbp;
+	uint32_t vtotal = vm->param.vact + vm->param.vfp + vm->param.vs + vm->param.vbp;
+
+	uint8_t vidformat = 0x02;
+	if (vm->param.vic == 16 || vm->param.vic == 31 || vm->param.vic == 32)
+		vidformat = 0x08;
+	tda_write(0x00, 0xa0, vidformat);
+
+	tda_write16(0x00, 0xa1, vm->param.hfp + 3);   // REFPIX
+	tda_write16(0x00, 0xa3, vm->param.vfp + 1);   // REFLINE
+	tda_write16(0x00, 0xa5, htotal);              // NPIX
+	tda_write16(0x00, 0xa7, vtotal);              // NLINE
+	tda_write16(0x00, 0xa9, vm->param.vfp);       // VS_LINE_STRT_1
+	tda_write16(0x00, 0xab, vm->param.hfp);       // VS_PIX_STRT_1
+	tda_write16(0x00, 0xad, vm->param.vfp + vm->param.vs); // VS_LINE_END_1
+	tda_write16(0x00, 0xaf, vm->param.hfp);       // VS_PIX_END_1
+	tda_write16(0x00, 0xb1, 0);                   // VS_LINE_STRT_2
+	tda_write16(0x00, 0xb3, 0);                   // VS_PIX_STRT_2
+	tda_write16(0x00, 0xb5, 0);                   // VS_LINE_END_2
+	tda_write16(0x00, 0xb7, 0);                   // VS_PIX_END_2
+	tda_write16(0x00, 0xb9, vm->param.hfp);       // HS_PIX_START
+	tda_write16(0x00, 0xbb, vm->param.hfp + vm->param.hs); // HS_PIX_STOP
+	tda_write16(0x00, 0xbd, vtotal - vm->param.vact - 1);  // VWIN_START_1
+	tda_write16(0x00, 0xbf, vtotal - 1);          // VWIN_END_1
+	tda_write16(0x00, 0xc1, 0);                   // VWIN_START_2
+	tda_write16(0x00, 0xc3, 0);                   // VWIN_END_2
+
+	tda_write(0x00, 0xd6, 0x00);                  // ENABLE_SPACE: fill active
+	tda_write(0x00, 0xf0, 0x00);                  // RPT_CNTRL: no pixel repeat
+
+	// color/processing (u-boot/Linux)
+	tda_write(0x00, 0x80, 0x03);                  // MAT_CONTRL: bypass | SC(1)
+	tda_set_bit(0x00, 0x0e, 0x03);                // FEAT_POWERDOWN: PREFILT|CSC
+	tda_write(0x00, 0xe4, 0x00);                  // HVF_CNTRL_0
+	tda_write(0x00, 0xe5, 0x00);                  // HVF_CNTRL_1
+	tda_write(0x00, 0x24, 0x00);                  // VIP_CNTRL_4
+	tda_write(0x00, 0x25, 0x00);                  // VIP_CNTRL_5
+
+	// TBG_CNTRL_1 must be programmed before TBG_CNTRL_0 (last register).
+	// DWIN_DIS (bit 6) is NOT set: it disables the data-island window, which
+	// would block the ACR and audio InfoFrame packets. Data islands require
+	// the HDMI encoder path, forced below like Linux/u-boot.
+	tda_write(0x00, 0xcb, 0x07);                  // TBG_CNTRL_1: TGL_EN|H_TGL|V_TGL
+	tda_write(0x00, 0xca, 0x00);                  // TBG_CNTRL_0
+	tda_write(0x11, 0x0d, 0x04);                  // ENC_CNTRL: CTL_CODE(1) -> HDMI
+	tda_set_bit(0x12, 0xb8, 0x02);                // TX33: TX33_HDMI
+
+	// AVI InfoFrame (IF2) for this mode, packed exactly like the kernel's
+	// hdmi_avi_infoframe_pack() + drm_hdmi_avi_infoframe_from_display_mode()
+	// for RGB full-range video. Aspect is fixed 16:9, same as stock MiSTer's
+	// ADV7513 config (hdmi_config_set_mode writes aspect bit 1 = 16:9 always).
+	// Write sequence mirrors tda998x_write_if(): clear flag, fill buffer, set.
+	{
+		uint8_t avi[17] = {
+			0x82, 0x02, 0x0d, 0x00,               // HB: AVI, ver 2, len 13, checksum
+			0x00, 0x20, 0x08, (uint8_t)vm->param.vic, // DB1..DB4: RGB full-range
+			0x00, 0x00, 0x00, 0x00,               // DB5..DB13
+			0x00, 0x00, 0x00, 0x00,
+			0x00
+		};
+		avi[3] = (uint8_t)(0x100 - (0x82 + 0x02 + 0x0d + avi[4] + avi[5] + avi[6] + avi[7]));
+		tda_clear_bit(0x11, 0x0f, 0x04);          // DIP_IF_FLAGS: IF2 off
+		for (uint i = 0; i < 17; i++)
+			tda_write(0x10, 0x40 + i, avi[i]);  // IF2 buffer (P10 0x40; IF4/AIF is at 0x80)
+		tda_set_bit(0x11, 0x0f, 0x04);            // DIP_IF_FLAGS: transmit IF2
+	}
+}
+
+static bool read_edid_segment_tda(uint8_t segment, uint8_t *buf)
+{
+	// 256 bytes per segment = two 128-byte EDID blocks, read through the
+	// TDA's DDC master channel (page 09h), mirroring the Linux tda998x driver.
+	for (uint8_t blk = 0; blk < 2; blk++)
+	{
+		uint8_t offset = (blk & 1) ? 128 : 0;
+
+		tda_write(0x09, 0xfb, 0xa0);    // DDC_ADDR
+		tda_write(0x09, 0xfc, offset);  // DDC_OFFS
+		tda_write(0x09, 0xfd, 0x60);    // DDC_SEGM_ADDR
+		tda_write(0x09, 0xfe, segment); // DDC_SEGM
+
+		// re-arm the EDID_BLK_RD interrupt enable before each block read
+		tda_write(0x00, 0x11, 0x02);
+		tda_write(0x09, 0xfa, 0x01); // EDID_CTRL: enable block read
+		tda_write(0x09, 0xfa, 0x00); // EDID_CTRL: clear (flag cleared by sw)
+
+		unsigned long timeout = GetTimer(1000);
+		bool done = false;
+		while (!CheckTimer(timeout))
+		{
+			int flags = tda_read(0x00, 0x11); // INT_FLAGS_2
+			if (flags >= 0 && (flags & 0x02)) { done = true; break; } // EDID_BLK_RD
+			usleep(10000);
+		}
+		if (!done)
+		{
+			int dbg = tda_read(0x00, 0x11);
+			printf("EDID timeout. (INT_FLAGS_2=0x%02X%s)\n",
+				dbg < 0 ? 0xff : dbg, dbg < 0 ? " read-fail" : "");
+			return false;
+		}
+
+		tda_write(0x00, 0x11, 0x02); // clear EDID_BLK_RD for the next block
+
+		tda_set_page(0x09);
+		for (uint16_t i = 0; i < 128; i++)
+		{
+			int value = i2c_smbus_read_byte_data(hdmi_main_fd, (uint8_t)i);
+			buf[offset + i] = (value < 0) ? 0 : (uint8_t)value;
+		}
+	}
+	return true;
+}
+#endif
+
 static void hdmi_config_init()
 {
+#ifdef CHAMELEON96
+	tda_config_init();
+	return;
+#endif
 	int ypbpr = (cfg.vga_mode_int == 1) && (cfg.direct_video == 1);
 	uint8_t int0 = hdmi_has_int() ? 0xC0 : 0x00; // HPD + SENSE
 
@@ -1595,6 +1947,10 @@ static void hdmi_config_init()
 
 static void hdmi_config_set_hdr()
 {
+#ifdef CHAMELEON96
+	// HDR mastering infoframe not supported on the TDA19988 path.
+	return;
+#endif
 	// Grab desired nits values
 	uint8_t maxNitsLSB = cfg.hdr_max_nits & 0xFF;
 	uint8_t maxNitsMSB = (cfg.hdr_max_nits >> 8) & 0xFF;
@@ -1670,6 +2026,10 @@ static void hdmi_invalidate_mode_cache()
 
 static void hdmi_config_set_mode(vmode_custom_t *vm)
 {
+#ifdef CHAMELEON96
+	tda_config_set_mode(vm);
+	return;
+#endif
 	PROFILE_FUNCTION();
 
 	const uint8_t vic_mode = (uint8_t)vm->param.vic;
@@ -1811,6 +2171,9 @@ static void cache_raw_edid_mfg_id(const uint8_t *buf)
 
 static bool read_edid_segment(uint8_t segment, uint8_t *buf)
 {
+#ifdef CHAMELEON96
+	return read_edid_segment_tda(segment, buf);
+#else
 	i2c_smbus_write_byte_data(hdmi_main_fd, 0x96, 4); // clear possible pending EDID IRQ (auto EDID after HPD)
 
 	i2c_smbus_write_byte_data(hdmi_main_fd, 0xC4, segment);
@@ -1840,12 +2203,31 @@ static bool read_edid_segment(uint8_t segment, uint8_t *buf)
 	printf("EDID timeout.\n");
 	i2c_smbus_write_byte_data(hdmi_main_fd, 0xC9, 0x03);
 	return false;
+#endif
 }
 
 static int read_edid(bool force = false)
 {
+#ifdef CHAMELEON96
+	if (hdmi_main_fd < 0) return 0;
+#else
 	if (hdmi_main_fd < 0 || hdmi_edid_fd < 0) return 0;
+#endif
 	if (is_edid_valid() && !force) return 1;
+
+#ifdef CHAMELEON96
+	// The TDA19988 powers its EDID RAM down at reset (TX4_PD_RAM=1), which
+	// wedges the DDC block read (EDID_BLK_RD never asserts). Clear it for the
+	// duration of the reads and restore it afterwards, and wait ~100ms before
+	// the first read — u-boot/Linux tda998x drivers do both (the delay avoids
+	// a timeout when reading close to an HPD assertion).
+	usleep(100000);
+	int tx4 = tda_read(0x12, 0x9b);
+	bool tda_tx4 = (tx4 >= 0);
+	if (tda_tx4) tda_write(0x12, 0x9b, tx4 & ~0x02);
+#else
+	bool tda_tx4 = false;
+#endif
 
 	// read into scratch; replace live edid[] only on a valid read, so a transient failure can't blank it
 	static uint8_t buf[sizeof(edid)];
@@ -1855,6 +2237,7 @@ static int read_edid(bool force = false)
 	// waiting for valid EDID
 	for (int k = 0; k < 20; k++)
 	{
+#ifndef CHAMELEON96
 		//Test if adv7513 senses hdmi clock. If not, don't bother with the edid query
 		int hpd_state = i2c_smbus_read_byte_data(hdmi_main_fd, 0x42);
 		if (hpd_state < 0 || ((hpd_state & 0x60) != 0x60))
@@ -1862,6 +2245,7 @@ static int read_edid(bool force = false)
 			raw_edid_mfg_id_valid = false;
 			return 0;
 		}
+#endif
 		bool got_interrupt = read_edid_segment(0, buf);
 		if (got_interrupt) ddc_responded = true;
 		if (is_edid_valid_buf(buf)) break;
@@ -1887,6 +2271,10 @@ static int read_edid(bool force = false)
 		// stored edid[], not buf: only when a prior valid read is being kept
 		if (is_edid_valid()) printf("Invalid EDID: keeping last valid EDID.\n");
 
+#ifdef CHAMELEON96
+		if (tda_tx4) tda_write(0x12, 0x9b, tx4); // TX4_PD_RAM back on
+#endif
+
 		return 0;
 	}
 
@@ -1905,6 +2293,9 @@ static int read_edid(bool force = false)
 	cache_raw_edid_mfg_id(edid);
 
 	edid_version++;
+#ifdef CHAMELEON96
+	if (tda_tx4) tda_write(0x12, 0x9b, tx4); // TX4_PD_RAM back on
+#endif
 	return 1;
 }
 
@@ -2717,6 +3108,11 @@ void video_reinit()
 
 void video_hdmi_power(int on)
 {
+#ifdef CHAMELEON96
+	// ADV7513 power-down register; the TDA19988 needs no power dance.
+	(void)on;
+	return;
+#endif
 	// ADV7513 power-down control. 0 = power on, 1 = power down.
 	if (hdmi_main_fd >= 0)
 	{

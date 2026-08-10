@@ -9,5 +9,5 @@ int shmem_unmap(void* map, uint32_t size);
 int shmem_put(uint32_t address, uint32_t size, void *buf);
 int shmem_get(uint32_t address, uint32_t size, void *buf);
 
-#define fpga_mem(x) (0x20000000 | ((x) & 0x1FFFFFFF))
+#define fpga_mem(x) (0x1E800000 | ((x) & 0x1FFFFFFF))
 #endif

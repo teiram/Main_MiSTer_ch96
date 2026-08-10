@@ -612,6 +612,28 @@ static void set_kbd_led(int led, int state)
 	}
 }
 
+#ifdef CHAMELEON96
+// Chameleon96: the two RF LEDs (yellow = FPGA LED[1], blue = LED[3]) default
+// to video-active / always-on in the bitstream. These let the app override
+// them via UIO_LEDS, OR-ed with the kbd-mode override on bits 5/6. Once the
+// app overrides, the RF LEDs stay app-controlled until the next mode change.
+static uint8_t ch96_rf_led_overtake = 0; // bit1 = yellow, bit3 = blue
+static uint8_t ch96_rf_led_state    = 0; // 1 = lit
+static uint8_t ch96_emu_led         = 0;
+
+static void ch96_leds_send()
+{
+	spi_uio_cmd16(UIO_LEDS, (0x6000 | (ch96_rf_led_overtake << 8)) | (ch96_emu_led | ch96_rf_led_state));
+}
+
+void user_io_set_rf_leds(int yellow_on, int blue_on)
+{
+	ch96_rf_led_overtake = 0x0A;
+	ch96_rf_led_state = (yellow_on ? 0x02 : 0) | (blue_on ? 0x08 : 0);
+	ch96_leds_send();
+}
+#endif
+
 static void set_emu_mode(int mode)
 {
 	uint8_t emu_led;
@@ -643,7 +665,12 @@ static void set_emu_mode(int mode)
 		Info("Kbd mode: Normal", 1000);
 	}
 
+#ifdef CHAMELEON96
+	ch96_emu_led = emu_led;
+	ch96_leds_send();
+#else
 	spi_uio_cmd16(UIO_LEDS, 0x6000 | emu_led);
+#endif
 	input_notify_mode();
 }
 
@@ -724,7 +751,7 @@ static void parse_config()
 						ss_base = 0;
 						printf("Invalid size!\n");
 					}
-					else if (ss_base < 0x20000000 || ss_base >= 0x40000000 || (ss_base + ss_size) >= 0x40000000)
+					else if (ss_base < 0x1E800000 || ss_base >= 0x20000000 || (ss_base + ss_size) >= 0x20000000)
 					{
 						ss_size = 0;
 						ss_base = 0;
@@ -928,7 +955,7 @@ static void parse_config()
 					if (substrcpy(str, p, 3))
 					{
 						load_addr = strtoul(str, NULL, 16);
-						if (load_addr < 0x20000000 || load_addr >= 0x40000000)
+						if (load_addr < 0x1E800000 || load_addr >= 0x20000000)
 						{
 							printf("Loading address 0x%X is outside the supported range! Using normal load.\n", load_addr);
 							load_addr = 0;
@@ -2860,7 +2887,7 @@ int user_io_file_tx(const char* name, unsigned char index, char opensave, char m
 		}
 	}
 
-	if (dosend && load_addr >= 0x20000000 && (load_addr + bytes2send) <= 0x40000000)
+	if (dosend && load_addr >= 0x1E800000 && (load_addr + bytes2send) <= 0x20000000)
 	{
 		uint32_t map_size = bytes2send + ((is_snes() && load_addr < 0x22000000) ? 0x800000 : 0);
 		uint8_t *mem = (uint8_t *)shmem_map(fpga_mem(load_addr), map_size);

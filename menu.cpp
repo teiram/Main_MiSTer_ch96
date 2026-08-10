@@ -2404,7 +2404,7 @@ void HandleUI(void)
 						if (substrcpy(s, p, 3))
 						{
 							load_addr = strtoul(s, NULL, 16);
-							if (load_addr < 0x20000000 || load_addr >= 0x40000000)
+							if (load_addr < 0x1E800000 || load_addr >= 0x20000000)
 							{
 								printf("Loading address 0x%X is outside the supported range! Using normal load.\n", load_addr);
 								load_addr = 0;
