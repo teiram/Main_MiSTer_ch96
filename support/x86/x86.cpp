@@ -46,7 +46,11 @@
 
 #define CFG_VER     3
 
+#ifdef CHAMELEON96
+#define SHMEM_ADDR  0x10000000 // Chameleon96: 486 DDR window base is 0x10000000 (top-half reservation); DE10 uses 0x30000000
+#else
 #define SHMEM_ADDR  0x30000000
+#endif
 
 #define IOWR(base, reg, value) x86_dma_set((base) + (reg), value)
 

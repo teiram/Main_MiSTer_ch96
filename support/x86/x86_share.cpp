@@ -43,7 +43,11 @@
 #include "../../cfg.h"
 #include "../../shmem.h"
 
+#ifdef CHAMELEON96
+#define SHMEM_ADDR      0x100CE000 // Chameleon96: 486 DDR window base 0x10000000 + PC 0xCE000 (shr_rgn)
+#else
 #define SHMEM_ADDR      0x300CE000
+#endif
 #define SHMEM_SIZE      0x2000
 static uint8_t *shmem = 0;
 
