@@ -227,6 +227,18 @@ static int findPLLpar(double Fout, uint32_t *pc, uint32_t *pm, double *pko)
 	uint32_t c = 1;
 	while ((Fout*c) < 400) c++;
 
+#ifdef CHAMELEON96
+	// Chameleon96: dynamic C retunes only commit when the C counter does not
+	// DECREASE below the fitted C (the compiled-in reset config is 74.25 MHz
+	// / C=6): a 6->3 ((2,1) split + odd flag) retune silently kept 6, and so
+	// did 6->4 ((2,2) - measured 594/6 = 99.0 MHz on board), while increases
+	// commit (6->10 at 40 MHz, 6->7 odd at 65 MHz). Never emit a decreasing
+	// C: clamp the counter to >= 6 and keep it even. Every supported Fout
+	// still fits the VCO cap (241.5 MHz pr-mode -> VCO 1449 <= 1500).
+	if (c < 6) c = 6;
+	if (c & 1) c++;
+#endif
+
 	while (1)
 	{
 		double fvco = Fout*c;
@@ -245,7 +257,11 @@ static int findPLLpar(double Fout, uint32_t *pc, uint32_t *pm, double *pko)
 				return 0;
 			}
 			printf("-> K is outside allowed range\n");
+#ifdef CHAMELEON96
+			c += 2; // keep the C counter even (see comment above)
+#else
 			c++;
+#endif
 		}
 		else
 		{
@@ -274,6 +290,10 @@ static void setPLL(double Fout, vmode_custom_t *v)
 	{
 		c = 1;
 		while ((Fout*c) < 400) c++;
+#ifdef CHAMELEON96
+		if (c < 6) c = 6; // never decrease the C counter (see findPLLpar)
+		if (c & 1) c++;
+#endif
 
 		fvco = Fout*c;
 		m = (uint32_t)(fvco / 50);
@@ -1647,10 +1667,59 @@ static void tda_config_set_mode(vmode_custom_t *vm)
 	uint32_t htotal = vm->param.hact + vm->param.hfp + vm->param.hs + vm->param.hbp;
 	uint32_t vtotal = vm->param.vact + vm->param.vfp + vm->param.vs + vm->param.vbp;
 
-	uint8_t vidformat = 0x02;
-	if (vm->param.vic == 16 || vm->param.vic == 31 || vm->param.vic == 32)
-		vidformat = 0x08;
+	// VIDFORMAT (P0 0xA0) declares the CEA-861 video format the transmitter
+	// should expect (NXP TDA9983B/TDA19988 Table 34); it is NOT a bus-format
+	// selector. VIC -> value per that table, 0x00 for everything else
+	// (custom/non-CEA canvases), exactly how the reference drivers use it.
+	uint8_t vidformat = 0x00;
+	switch (vm->param.vic)
+	{
+	case 2:
+	case 3:  vidformat = 0x01; break;
+	case 4:  vidformat = 0x02; break; // 1280x720p60 - board-validated look
+	case 5:  vidformat = 0x03; break;
+	case 6:
+	case 7:  vidformat = 0x04; break;
+	case 8:
+	case 9:  vidformat = 0x05; break;
+	case 16: vidformat = 0x06; break; // 1920x1080p60
+	case 17:
+	case 18: vidformat = 0x07; break;
+	case 19: vidformat = 0x08; break; // 1280x720p50
+	case 20: vidformat = 0x09; break;
+	case 21:
+	case 22: vidformat = 0x0a; break;
+	case 23:
+	case 24: vidformat = 0x0b; break;
+	case 31: vidformat = 0x1f; break; // 1920x1080p50 ("others")
+	default: vidformat = 0x00; break; // VIC 1 (640x480p60) / custom, non-CEA canvases
+	}
 	tda_write(0x00, 0xa0, vidformat);
+
+	// Serializer PLL follows the actual TMDS rate: Linux tda998x selection
+	// (break when 80000>>div kHz <= tmds_clock) - div=1 at the validated
+	// 74.25 MHz, div=0 at 148.5 MHz (1080p). SRL_PR stays 0: MiSTer does
+	// pixel repetition in the FPGA, never at the transmitter (the TDA-boxed
+	// pr-mode canvas, 2560x1440, would need twice the TDA TMDS limit anyway).
+	double tmds_khz = vm->Fpix * 1000.0;
+	int div;
+	for (div = 0; div < 3; div++)
+	{
+		if (80000 >> div <= tmds_khz) break;
+	}
+	tda_write(0x02, 0x01, (uint8_t)div); // PLL_SERIAL_2: SRL_NOSC(div) | SRL_PR(0)
+
+	// AUDIO_DIV: largest divider keeping serclk/2^adiv above 128*fs for the
+	// app's fixed 48 kHz I2S (Linux tda998x_get_adiv rule): SERCLK_8 at
+	// 74.25 MHz (validated), SERCLK_16 at 148.5 MHz, SERCLK_4 below ~50 MHz.
+	// Replaces the 720p60-only static value; same kernel rule as SEL_CLK etc.
+	double tmds_hz = tmds_khz * 1000.0;
+	int adiv;
+	for (adiv = 5; adiv > 0; adiv--)
+	{
+		if (tmds_hz > 6144000 << adiv) break;
+	}
+	tda_write(0x02, 0x0e, (uint8_t)adiv); // AUDIO_DIV: SERCLK_(1<<adiv)
 
 	tda_write16(0x00, 0xa1, vm->param.hfp + 3);   // REFPIX
 	tda_write16(0x00, 0xa3, vm->param.vfp + 1);   // REFLINE
