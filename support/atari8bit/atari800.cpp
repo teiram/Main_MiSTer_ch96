@@ -136,12 +136,12 @@ typedef struct {
 #define TC_MODE_CORINA_1024     0x72
 #define TC_MODE_BOUNTY_40	0x73
 
-static const cart_def_t cart_def[] = 
+static const cart_def_t cart_def[] =
 {
 	{ 1,  "Standard       ", TC_MODE_8K,              8 },
 	{ 2,  "Standard       ", TC_MODE_16K,            16 },
 	// This below is intentional, for 034M carts we fix them
-	// (we also need to add 2 extra fake AND-ed banks for 
+	// (we also need to add 2 extra fake AND-ed banks for
 	// both 043M and 034M)
 	{ 3,  "OSS 2 Chip 034M", TC_MODE_OSS_043M,       16 },
 	{ 5,  "DB             ", TC_MODE_DB_32,          32 },
@@ -270,6 +270,7 @@ static uint8_t mounted_cart2_type;
 static int mounted_cart1_size;
 static fileTYPE cart1_file = {};
 static fileTYPE cart2_file = {};
+static int core_hz;
 
 static void reboot_800(uint8_t cold, uint8_t pause, uint8_t phase = 3)
 {
@@ -309,9 +310,9 @@ static void reboot_800(uint8_t cold, uint8_t pause, uint8_t phase = 3)
 		}
 		set_a8bit_reg(REG_XEX_LOADER, 0);
 	}
-	
-	// Both cold==1 and pause==1 is a special case when 
-	// the XEX loader performs a cold/warm boot to push 
+
+	// Both cold==1 and pause==1 is a special case when
+	// the XEX loader performs a cold/warm boot to push
 	// in the loader, in this case on the 800 we just want
 	// the same effect as pressing the RESET (so soft)
 	// while we actually mean a power cycle with forced
@@ -328,6 +329,16 @@ static void reboot_800(uint8_t cold, uint8_t pause, uint8_t phase = 3)
 	{
 		if(phase & 0x01) set_a8bit_reg(REG_RESET, 1);
 		if(phase & 0x02) set_a8bit_reg(REG_RESET, 0);
+	}
+
+	switch(get_a8bit_reg(REG_ATARI_STATUS3) & STATUS3_MASK_CORE_CLK)
+	{
+		case 0b100: core_hz = 28375152; break;
+		case 0b101: core_hz = 28454400; break;
+		case 0b000: core_hz = 28636364; break;
+		case 0b001: core_hz = 28644608; break;
+		case 0b010: core_hz = 28673280; break;
+		default:    core_hz = 0; break;
 	}
 
 	if(phase & 0x02)
@@ -552,14 +563,14 @@ int atari800_check_cartridge_file(const char* name, unsigned char index)
 	int to_read = 0x2000;
 	int idx = 0;
 	int file_size;
-	
+
 	cart_match_car = 0;
 	cart_matches_total = 0;
 	cart_io_index = index;
-	
+
 	int ext_index = index >> 6;
 	uint8_t stacked = (index & 0x3F) == 9;
-	
+
 	if (!(stacked && mounted_cart1_size > 0x100000) && FileOpen(&f, name))
 	{
 		file_size = f.size;
@@ -575,7 +586,7 @@ int atari800_check_cartridge_file(const char* name, unsigned char index)
 		}
 		FileReadAdv(&f, a8bit_buffer, to_read);
 		FileClose(&f);
-		
+
 		if(cart_match_car)
 		{
 			// CAR file, presumably, let's check further
@@ -632,7 +643,7 @@ void atari800_open_cartridge_file(const char* name, int match_index)
 	uint8_t cart_type = cart_def[cart_matches_idx[match_index]].cart_type;
 
 	FileClose(f);
-	
+
 	if (FileOpenEx(f, name, !FileCanWrite(name) || (get_a8bit_reg(REG_ATARI_STATUS1) & STATUS1_MASK_RDONLY) ? O_RDONLY : (O_RDWR | O_SYNC)))
 	{
 		// set_a8bit_reg(REG_PAUSE, 1);
@@ -642,7 +653,7 @@ void atari800_open_cartridge_file(const char* name, int match_index)
 
 		user_io_set_index(cart_io_index);
 		user_io_set_download(1);
-	
+
 		if(cart_type == 3 || cart_type == 45)
 		{
 			ProgressMessage("Loading", f->name, 0, 6);
@@ -658,12 +669,12 @@ void atari800_open_cartridge_file(const char* name, int match_index)
 			ProgressMessage("Loading", f->name, 2, 6);
 			FileReadAdv(f, buf2, 4096); // NOTE different buffer!
 			user_io_file_tx_data(buf2, 4096);
-			
+
 			if (cart_type == 3) FileSeek(f, offset + 12288, SEEK_SET);
 			ProgressMessage("Loading", f->name, 3, 6);
 			FileReadAdv(f, buf, 4096);
 			user_io_file_tx_data(buf, 4096);
-			
+
 			FileSeek(f, offset, SEEK_SET);
 			ProgressMessage("Loading", f->name, 4, 6);
 			FileReadAdv(f, buf, 4096);
@@ -714,9 +725,11 @@ void atari800_open_cartridge_file(const char* name, int match_index)
 void atari800_open_bios_file(const char* name, unsigned char index)
 {
 	uint8_t bios_index = (index & 0x3F);
-	uint16_t mode800 = get_a8bit_reg(REG_ATARI_STATUS1) & STATUS1_MASK_MODE800;
+	uint16_t mode800 = get_a8bit_reg(REG_ATARI_STATUS1);
+	uint16_t os_16k = mode800 & STATUS1_MASK_OS16K;
+	mode800 &= STATUS1_MASK_MODE800;
 	user_io_file_tx(name, index);
-	if((mode800 && bios_index == 6) || (!mode800 && (bios_index == 4 || bios_index == 5))) reboot_800(1, 0);
+	if((mode800 && (bios_index == (os_16k ? 4 : 6))) || (!mode800 && (bios_index == 4 || bios_index == 5))) reboot_800(1, 0);
 }
 
 #define MAX_DRIVES 15
@@ -988,7 +1001,7 @@ static uint8_t loadAtxFile(int drv_num)
 }
 
 // Return 0 on full success, 1 on "Atari disk problem" (may have data)
-// -1 on internal storage problem (corrupt ATX) 
+// -1 on internal storage problem (corrupt ATX)
 static int transferAtxSector(int drv_num, uint16_t num, uint8_t *status, int op_type = ATX_FILE_ACCESS_READ, uint8_t verify_op = 0)
 {
 
@@ -999,7 +1012,7 @@ static int transferAtxSector(int drv_num, uint16_t num, uint8_t *status, int op_
 	atxTrackChunk *extSectorData;
 
 	int r = 1;
-	
+
 	uint8_t is1050 = get_a8bit_reg(REG_ATARI_STATUS1) & STATUS1_MASK_ATX1050 ? 1 : 0;
 
 	// calculate track and relative sector number from the absolute sector number
@@ -1033,7 +1046,7 @@ static int transferAtxSector(int drv_num, uint16_t num, uint8_t *status, int op_
 	uint16_t sectorCount = 0;
 	// read the track header
 	uint32_t currentFileOffset = atx_info[drv_num].trackOffset[tgtTrackNumber];
-	
+
 	if (currentFileOffset)
 	{
 		if(atx_file_access(drv_num, ATX_FILE_ACCESS_READ, currentFileOffset, sizeof(atxTrackHeader)))
@@ -1207,11 +1220,11 @@ static int transferAtxSector(int drv_num, uint16_t num, uint8_t *status, int op_
 			}
 
 			uint16_t au_one_sector_read = (23+actSectorSize)*(atx_info[drv_num].density == atx_single ? 8 : 4)+2;
-			// We will need to circulate around the disk one more time if we are re-reading the just written sector	    
+			// We will need to circulate around the disk one more time if we are re-reading the just written sector
 			wait_from_stamp((au_one_sector_read + pTT + (pTT > 0 ? 0 : AU_FULL_ROTATION))*8);
 
 			if (*status)
-			{		    
+			{
 				// This is according to Altirra, but it breaks DjayBee's test J in 1050 mode?!
 				// wait_us(is1050 ? (US_TRACK_STEP_1050+US_HEAD_SETTLE_1050) : (AU_FULL_ROTATION*8));
 				// This is what seems to work:
@@ -1235,7 +1248,7 @@ static int transferAtxSector(int drv_num, uint16_t num, uint8_t *status, int op_
 				}
 			}
 		}
-	
+
 		getCurrentHeadPosition();
 
 		if (!*status || r < 0) break;
@@ -1391,7 +1404,7 @@ static uint8_t hdd_partition_scan(fileTYPE *file, uint8_t info)
 
 	if(atari_sector_buffer[0] == 0x10) info |= INFO_META;
 	else if(atari_sector_buffer[0]) return 0;
-	
+
 	info |= (atari_sector_buffer[4] & 0xF);
 	for(int pidx = 0; pidx < 15; pidx++)
 	{
@@ -1454,7 +1467,7 @@ static void set_drive_status(int drive_number, const char *name, uint8_t ext_ind
 {
 	uint8_t info = 0;
 	atr_header_t atr_header;
-	
+
 	if(drive_number == 4) drive_number = MAX_DRIVES;
 
 	if(drive_number < MAX_DRIVES && (drive_infos[drive_number].info & INFO_HDD)) return;
@@ -2065,7 +2078,6 @@ static void process_command()
 	}
 }
 
-#define CORE_HZ         28636364
 #define MAX_MS          60000
 
 #define cas_header_FUJI 0x494A5546
@@ -2142,7 +2154,7 @@ static uint32_t cas_read_forward(uint32_t offset) {
 
 			case cas_header_baud:
 				if(cas_header.chunk_length) return 0;
-				cas_sample_duration = (CORE_HZ + cas_header.aux.aux_w / 2) / cas_header.aux.aux_w;
+				cas_sample_duration = (core_hz + cas_header.aux.aux_w / 2) / cas_header.aux.aux_w;
 				break;
 
 			case cas_header_data:
@@ -2159,7 +2171,7 @@ static uint32_t cas_read_forward(uint32_t offset) {
 				cas_block_multiple = 2;
 				cas_fsk_bit = 0;
 				goto cas_read_forward_exit;
-				
+
 			case cas_header_pwms:
 				if(cas_header.chunk_length != 2)
 				{
@@ -2184,7 +2196,7 @@ static uint32_t cas_read_forward(uint32_t offset) {
 					goto cas_read_forward_exit;
 				}
 				offset += bytes_read;
-				pwm_sample_duration = (CORE_HZ + pwm_sample_duration / 2) / pwm_sample_duration;
+				pwm_sample_duration = (core_hz + pwm_sample_duration / 2) / pwm_sample_duration;
 				break;
 
 			case cas_header_pwmc:
@@ -2238,7 +2250,7 @@ static void handle_cas()
 	while(silence_duration > 0) {
 		uint16_t silence_block_len = silence_duration;
 		if(silence_block_len >= MAX_MS) silence_block_len = MAX_MS;
-		atari800_tape_enqueue(silence_bit, ((CORE_HZ + 500) / 1000) * silence_block_len);
+		atari800_tape_enqueue(silence_bit, ((core_hz + 500) / 1000) * silence_block_len);
 		silence_duration -= silence_block_len;
 	}
 
@@ -2265,7 +2277,7 @@ static void handle_cas()
 			case cas_header_fsk:
 			case cas_header_pwml:
 				ld = a8bit_buffer[i] | (a8bit_buffer[i+1] << 8);
-				if(ld) atari800_tape_enqueue(cas_fsk_bit, (cas_block_turbo ? pwm_sample_duration : ((CORE_HZ + 5000)/10000)) * ld);
+				if(ld) atari800_tape_enqueue(cas_fsk_bit, (cas_block_turbo ? pwm_sample_duration : ((core_hz + 5000)/10000)) * ld);
 				cas_fsk_bit ^= 1;
 				break;
 
@@ -2333,13 +2345,13 @@ void atari800_set_image(int ext_index, int file_index, const char *name)
 		cas_block_pause = (get_a8bit_reg(REG_ATARI_STATUS2) & STATUS2_MASK_TAPE_SLOW) ? 400000 : 10000;
 		if(name[0] && FileOpen(&cas_file, name))
 		{
-			cas_sample_duration = (CORE_HZ + 300) / 600;
+			cas_sample_duration = (core_hz + 300) / 600;
 			if(FileReadAdv(&cas_file, (uint8_t *)&cas_header, sizeof(cas_header_t)) == sizeof(cas_header_t) && cas_header.signature == cas_header_FUJI)
 			{
 				cas_offset = cas_read_forward(cas_header.chunk_length + sizeof(cas_header_t));
 			}
 		}
-		
+
 		if(!cas_offset)
 		{
 			FileClose(&cas_file);
@@ -2372,12 +2384,12 @@ void atari800_set_image(int ext_index, int file_index, const char *name)
 			atari8bit_dma_zero(SDRAM_BASE, 0x10000);
 			atari8bit_dma_write(xex_loader, ATARI_BASE + 0xD100, (uint32_t)sizeof(xex_loader));
 			static uint8_t write_bytes[4];
-			
+
 			write_bytes[0] = 0;
-			atari8bit_dma_write(write_bytes, ATARI_COLDST, 1);			
-			atari8bit_dma_write(write_bytes, ATARI_GINTLK, 1);			
+			atari8bit_dma_write(write_bytes, ATARI_COLDST, 1);
+			atari8bit_dma_write(write_bytes, ATARI_GINTLK, 1);
 			write_bytes[0] = 1;
-			atari8bit_dma_write(write_bytes, ATARI_BASICF, 1);			
+			atari8bit_dma_write(write_bytes, ATARI_BASICF, 1);
 			write_bytes[0] = 2;
 			atari8bit_dma_write(write_bytes, ATARI_BOOTFLAG, 1);
 			write_bytes[0] = XEX_INIT1;
@@ -2387,21 +2399,35 @@ void atari800_set_image(int ext_index, int file_index, const char *name)
 			write_bytes[1] = 0xE4;
 			atari8bit_dma_write(write_bytes, ATARI_DOSVEC, 2);
 
-			if(!(atari_status1 & STATUS1_MASK_MODE800))
+			// Identify Brian's OS that violates the standard layout somewhat
+			atari800_dma_read(write_bytes, 0xC006, 4);
+			if(write_bytes[0] == 0x42 && write_bytes[1] == 0x42 && write_bytes[2] == 0x00 && write_bytes[3] == 0x64)
 			{
 				write_bytes[0] = 0x5C;
 				write_bytes[1] = 0x93;
 				write_bytes[2] = 0x25;
-				atari8bit_dma_write(write_bytes, ATARI_PUPBT, 3);						
+				write_bytes[3] = 0x60;
+				atari8bit_dma_write(write_bytes, 0x245, 1);
+				atari8bit_dma_write(write_bytes + 1, ATARI_PUPBT + 1, 2);
+				atari8bit_dma_write(write_bytes + 3, 0x3ED, 1);
 			}
-			
+			else if(!(atari_status1 & STATUS1_MASK_MODE800))
+			{
+				write_bytes[0] = 0x5C;
+				write_bytes[1] = 0x93;
+				write_bytes[2] = 0x25;
+				write_bytes[3] = 0x60;
+				atari8bit_dma_write(write_bytes, ATARI_PUPBT, 3);
+				atari8bit_dma_write(write_bytes + 3, 0x3ED, 1);
+			}
+
 			set_a8bit_reg(REG_PAUSE, 0);
 
 		}
 		else
 		{
 			FileClose(&xex_file);
-		}		
+		}
 	}
 	else if(file_index == 6) // D1: disk image with automatic boot
 	{
@@ -2430,7 +2456,7 @@ void atari800_set_image(int ext_index, int file_index, const char *name)
 
 static uint8_t process_command_pbi(const uint8_t *drives_config)
 {
-	// We are more or less guranteed to serve the correct device id and 
+	// We are more or less guranteed to serve the correct device id and
 	// drive unit number by now, no need to check here
 	// mark a bit (0x40) in deviceId to indicate this is PBI, this is not the same
 	// as the XDCB bit (0x80)
@@ -2448,7 +2474,7 @@ static uint8_t process_command_pbi(const uint8_t *drives_config)
 
 	/*
 	  This piece of admitedely contrived logic takes care of diverting or not further processing
-	  to SIO routines. The procedure is not exactly the same as on, say, Ultimate 1MB PBI BIOS, nor 
+	  to SIO routines. The procedure is not exactly the same as on, say, Ultimate 1MB PBI BIOS, nor
 	  it is strictly according to the PBI API requirements, here we (safely?) assume there are no
 	  other PBI devices (and hence ROM BIOSes), so this allows us to take some shortcuts (which also
 	  speeds up things on the Atari / SDX side).
@@ -2459,7 +2485,7 @@ static uint8_t process_command_pbi(const uint8_t *drives_config)
 	if(sd_device && !drive) drive = MAX_DRIVES;
 
 	fileTYPE *file = &drive_infos[drive < MAX_DRIVES && (drive_infos[drive].info & INFO_HDD) ? MAX_DRIVES : drive].file;
-	
+
 	if(file->opened())
 	{
 		if(drive_infos[drive].info & INFO_HDD) // The type should be then ATR
@@ -2517,7 +2543,7 @@ static uint8_t process_command_pbi(const uint8_t *drives_config)
 		else
 		{
 			iocb[3] = 0x8B;
-		}		
+		}
 	}
 	atari8bit_dma_write(&iocb[0x03], ATARI_BASE + 0x303, 1);
 	set_a8bit_reg(REG_DRIVE_LED, 0);
@@ -2527,7 +2553,7 @@ static uint8_t process_command_pbi(const uint8_t *drives_config)
 void handle_pbi()
 {
 	if(!(get_a8bit_reg(REG_ATARI_STATUS1) & STATUS1_MASK_MODEPBI)) return;
-	
+
 	static uint8_t pbi_ram_base[16];
 	static uint8_t pbi_drives_config[4];
 
@@ -2577,7 +2603,7 @@ void handle_pbi()
 static void handle_xex()
 {
 	atari800_dma_read(a8bit_buffer, ATARI_BASE + 0xD100, XEX_READ_STATUS+1);
-	
+
 	if(a8bit_buffer[0] == 0x60)
 	{
 		if(!a8bit_buffer[XEX_READ_STATUS])
@@ -2592,7 +2618,7 @@ static void handle_xex()
 			a8bit_buffer[0] = 0x00;
 			a8bit_buffer[1] = 0xD1;
 			atari8bit_dma_write(a8bit_buffer, ATARI_INITAD, 2);
-			
+
 			while(len_buf[0] == 0xFF && len_buf[1] == 0xFF)
 			{
 				if(FileReadAdv(&xex_file, len_buf, 2) != 2) goto xex_eof;
@@ -2600,17 +2626,17 @@ static void handle_xex()
 			read_offset = len_buf[0] | (len_buf[1] << 8);
 			if(xex_file_first_block)
 			{
-				xex_file_first_block = 0;					
+				xex_file_first_block = 0;
 				atari8bit_dma_write(len_buf, ATARI_RUNAD, 2);
 			}
-			
+
 			if(FileReadAdv(&xex_file, len_buf, 2) != 2) goto xex_eof;
-			
+
 			read_len = (len_buf[0] | (len_buf[1] << 8)) + 1 - read_offset;
 			if(read_len < 1) goto xex_eof;
-			
+
 			to_read = read_len > BUFFER_SIZE ? BUFFER_SIZE : read_len;
-			
+
 			while(read_len)
 			{
 				if(FileReadAdv(&xex_file, a8bit_buffer, to_read) != to_read) goto xex_eof;
@@ -2701,7 +2727,7 @@ void atari800_poll()
 {
 	check_reset_pause();
 	check_flash();
-	
+
 	if(xex_file.opened()) handle_xex();
 	if(cas_file.opened()) handle_cas();
 	handle_pbi();
@@ -2754,4 +2780,14 @@ void atari800_reset()
 	speed_index = 0;
 	uart_init(speeds[speed_index] + 6);
 	reboot_800(1, 0);
+}
+char is_atari800()
+{
+	static int is_atari800_type = 0;
+	if (!is_atari800_type && user_io_get_core_name(1)[0])
+	{
+		is_atari800_type = strcasecmp(user_io_get_core_name(1), "Atari800") ? 2 : 1;
+		if (is_atari800_type == 1) core_poll = atari800_poll;
+	}
+	return (is_atari800_type == 1);
 }

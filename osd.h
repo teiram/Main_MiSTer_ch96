@@ -22,12 +22,12 @@ void OsdWriteOffset(unsigned char n, const char *s, unsigned char inver, unsigne
 void OsdClear();
 void OsdEnable(unsigned char mode);
 void InfoEnable(int x, int y, int width, int height);
-void OsdRotation(uint8_t rotate);
 void OsdDisable();
 void OsdMenuCtl(int en);
 void OsdUpdate();
 void OSD_PrintInfo(const char *message, int *width, int *height, int frame = 0);
 void OsdDrawLogo(int row);
+void OsdDrawBitmapRow(unsigned char n, const unsigned char *cols, int width);
 void ScrollText(char n, const char *str, int off, int len, int max_len, unsigned char invert, int idx = 0);
 void ScrollReset(int idx = 0);
 void StarsInit();
@@ -39,6 +39,7 @@ void OsdCoreNameSet(const char* str);
 char* OsdCoreNameGet();
 void OsdSetSize(int n);
 int OsdGetSize();
+int OsdGetRotation(bool scaled);
 
 #define OsdIsBig (OsdGetSize()>8)
 

@@ -31,6 +31,8 @@
 #define IDE_STATE_WAIT_PKT_RD   4
 #define IDE_STATE_WAIT_PKT_END  5
 #define IDE_STATE_WAIT_PKT_MODE 6
+#define IDE_STATE_WAIT_RD       7
+#define IDE_STATE_WAIT_WR       8
 
 struct regs_t
 {
@@ -92,7 +94,7 @@ struct drive_t
 	uint8_t  last_load_state;
 	uint8_t  track_cnt;
 	uint8_t  data_num;
-	track_t  track[50];
+	track_t  track[100];
 
 	uint8_t  playing;
 	uint8_t  paused;
@@ -123,6 +125,11 @@ struct ide_config
 	uint32_t prepcnt;
 	regs_t   regs;
 
+	uint32_t xfer_lba;
+	uint16_t xfer_cnt;
+	uint8_t  xfer_multi;
+	uint8_t  xfer_irq;
+
 	drive_t drive[2];
 };
 
@@ -139,12 +146,6 @@ struct chs_t
 extern ide_config ide_inst[2];
 extern const uint32_t ide_io_max_size;
 extern uint8_t ide_buf[];
-
-extern drive_t cd32_drive;
-extern drive_t cdtv_drive;
-
-// slot: 0 = cd32_drive, 1 = cdtv_drive
-int cd_drive_open(int slot, const char *filename);
 
 void ide_print_regs(regs_t *regs);
 void ide_get_regs(ide_config *ide);
