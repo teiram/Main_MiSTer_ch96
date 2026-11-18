@@ -380,6 +380,17 @@ static int start_sectors[4][85] = {
 static uint32_t c64_synthesize_gcr_track(int idx, uint8_t track_h, int size);
 static void c64_synthesize_g64_image(int idx, uint32_t phys_addr, uint32_t map_size);
 
+#ifdef CHAMELEON96
+// Chameleon96: only 512 MB SDRAM (0x0-0x1FFFFFFF), so the DE10 base 0x30000000
+// (768 MB) is out of range and faults on mount. GCR shadow lives in the idle
+// upper ao486 window (reserved no-map, FINDINGS §14a/§21); FPGA-side DDRAM_ADDR
+// for a future direct-GCR core = 0x1B800000 >> 3 = 0x03700000 (byte=word<<3, §21a).
+#define C64_GCR_DDR_BASE 0x1B800000
+#else
+// DE10: 1 GB SDRAM; ARM byte 0x30000000 = FPGA DDRAM_ADDR 0x06000000 (byte=word<<3).
+#define C64_GCR_DDR_BASE 0x30000000
+#endif
+
 int c64_openGCR(const char *path, fileTYPE *f, int idx)
 {
 	// Return value:
@@ -427,8 +438,9 @@ int c64_openGCR(const char *path, fileTYPE *f, int idx)
 		// - downward compatible to all previous C64 cores
 		// - no desync between C64/C1541 while reading/writing
 		//
-		// phys_addr = 0x30000000 (ARM) <=> 29'h06000000 (FPGA)
-		uint32_t phys_addr = 0x30000000 + ((idx & 1) * 0x200000);
+		// phys_addr = 0x30000000 (ARM) <=> 29'h06000000 (FPGA) on DE10;
+		// on ch96 the GCR shadow moves to C64_GCR_DDR_BASE (FINDINGS §24)
+		uint32_t phys_addr = C64_GCR_DDR_BASE + ((idx & 1) * 0x200000);
 		void* ddram = shmem_map(phys_addr, f->size);
 		if (ddram)
 		{
@@ -455,7 +467,7 @@ int c64_openGCR(const char *path, fileTYPE *f, int idx)
 
 		// Convert D64/D71 image to synthesized G64/G71 image in DDR3 Ram
 		// Parallel to hps_io functionality -> fully backwards compatible
-		uint32_t phys_addr = 0x30000000 + ((idx & 1) * 0x200000);
+		uint32_t phys_addr = C64_GCR_DDR_BASE + ((idx & 1) * 0x200000);
 		uint32_t map_size = 0x200000; // 2MB is enough for a synthesized G71
 		c64_synthesize_g64_image(idx, phys_addr, map_size);
 
