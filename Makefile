@@ -59,6 +59,12 @@ endif
 CFLAGS	= $(DFLAGS) -Wall -Wextra -Wno-strict-aliasing -Wno-stringop-overflow -Wno-stringop-truncation -Wno-format-truncation -Wno-psabi -Wno-restrict -c
 LFLAGS	= -lc -lstdc++ -lm -lrt $(IMLIB2_LIB) -Llib/bluetooth -lbluetooth -lpthread
 
+# buildroot toolchains default to PIE/shared-object linking; the target is a
+# plain EXE (as produced by the stock gcc-arm-10.2 toolchain, e_type EXEC).
+# -no-pie / -fno-pie also avoids R_ARM_THM_MOVW_ABS_NC link errors there.
+CFLAGS	+= -fno-pie
+LFLAGS	+= -no-pie -fno-pie
+
 OUTPUT_FILTER = sed -e 's/\(.[a-zA-Z]\+\):\([0-9]\+\):\([0-9]\+\):/\1(\2,\ \3):/g'
 
 ifneq ($(DEBUG),1)
